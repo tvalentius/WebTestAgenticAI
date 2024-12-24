@@ -1,0 +1,17 @@
+{
+  "name": "ai-web-testing",
+  "version": "1.0.0",
+  "description": "AI-powered website testing using Playwright and OpenAI",
+  "main": "server.js",
+  "scripts": {
+    "test": "playwright test",
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "@playwright/test": "^1.40.0",
+    "openai": "^4.20.0",
+    "dotenv": "^16.3.1",
+    "express": "^4.18.2"
+  },
+  "type": "module"
+}
