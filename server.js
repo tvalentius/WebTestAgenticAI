@@ -1,9 +1,9 @@
 import express from 'express';
 import { test as playwrightTest } from '@playwright/test';
-import OpenAI from 'openai';
 import dotenv from 'dotenv';
 import fs from 'fs';
 import path from 'path';
+import TestOrchestrator from './lib/test_orchestrator.js';
 
 dotenv.config();
 
@@ -11,26 +11,59 @@ const app = express();
 app.use(express.json());
 app.use('/screenshots', express.static('screenshots'));
 
-const openai = new OpenAI({
-  apiKey: process.env.OPENAI_API_KEY
+// Initialize test orchestrator
+const orchestrator = new TestOrchestrator({
+    screenshotDir: './screenshots',
+    maxRetries: 3,
+    timeout: 30000
 });
 
 // Store test results
 let testResults = [];
 
 function generateHtmlReport(result) {
-  const timestamp = new Date().toLocaleString('en-US', { 
-    timeZone: 'Asia/Jakarta',
-    year: 'numeric',
-    month: 'long',
-    day: 'numeric',
-    hour: '2-digit',
-    minute: '2-digit',
-    second: '2-digit',
-    hour12: false
-  });
+    const timestamp = new Date().toLocaleString('en-US', { 
+        timeZone: 'Asia/Jakarta',
+        year: 'numeric',
+        month: 'long',
+        day: 'numeric',
+        hour: '2-digit',
+        minute: '2-digit',
+        second: '2-digit',
+        hour12: false
+    });
 
-  return `<!DOCTYPE html>
+    const stepsHtml = result.state.history.map(step => {
+        const failed = result.state.artifacts.errors.some(error => error.step === step.step);
+        const error = failed ? result.state.artifacts.errors.find(e => e.step === step.step) : null;
+        
+        return `
+            <div class="step ${failed ? 'failed' : 'success'}">
+                <p>${failed ? '❌' : '✅'} ${step.step}</p>
+                ${error ? `
+                    <div class="error">
+                        Error: ${error.error}
+                    </div>
+                ` : ''}
+            </div>
+        `;
+    }).join('');
+
+    const screenshotsHtml = result.state.artifacts.screenshots.map((screenshot, index) => `
+        <div class="screenshot">
+            <img src="/screenshots/${screenshot.path}" alt="Screenshot ${index + 1}">
+            <p>Step ${index + 1}: ${screenshot.step || 'Unknown step'}</p>
+        </div>
+    `).join('');
+
+    const analysisHtml = result.state.artifacts.analysis.map(analysis => `
+        <div class="analysis-item">
+            <p><strong>Step:</strong> ${analysis.step || 'General'}</p>
+            <p>${analysis.content}</p>
+        </div>
+    `).join('');
+
+    return `<!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
@@ -136,6 +169,13 @@ function generateHtmlReport(result) {
             border-radius: 4px;
             margin: 20px 0;
         }
+        .analysis-item {
+            margin-bottom: 20px;
+            padding: 15px;
+            background-color: white;
+            border-radius: 4px;
+            box-shadow: 0 1px 3px rgba(0,0,0,0.1);
+        }
     </style>
 </head>
 <body>
@@ -143,49 +183,32 @@ function generateHtmlReport(result) {
         <div class="header">
             <h1>Website Testing Report</h1>
             <p class="timestamp">Generated on: ${timestamp}</p>
-            <div class="status ${result.status}">${result.status}</div>
+            <div class="status ${result.state.metadata.status}">${result.state.metadata.status}</div>
         </div>
 
         <div class="section">
             <h2>Test Information</h2>
             <p><strong>Website:</strong> video-converter.com</p>
-            <p><strong>Test Case:</strong> ${result.testName}</p>
-            <p><strong>Test Duration:</strong> ${Math.round((new Date(result.timestamp) - new Date(result.startTime)) / 1000)} seconds</p>
+            <p><strong>Test Case:</strong> YouTube URL Upload Test</p>
+            <p><strong>Duration:</strong> ${Math.round((new Date(result.state.metadata.endTime) - new Date(result.state.metadata.startTime)) / 1000)} seconds</p>
         </div>
 
         <div class="section">
             <h2>Test Steps</h2>
-            ${result.steps.map(step => {
-              const failed = result.failedSteps.includes(step);
-              return `
-                <div class="step ${failed ? 'failed' : 'success'}">
-                    <p>${failed ? '❌' : '✅'} ${step}</p>
-                    ${failed && result.error ? `
-                        <div class="error">
-                            Error: ${result.error}
-                        </div>
-                    ` : ''}
-                </div>
-              `;
-            }).join('')}
+            ${stepsHtml}
         </div>
 
         <div class="section">
             <h2>AI Analysis</h2>
             <div class="analysis">
-                ${result.description}
+                ${analysisHtml}
             </div>
         </div>
 
         <div class="section">
             <h2>Screenshots</h2>
             <div class="screenshots">
-                ${result.screenshots.map((screenshot, index) => `
-                    <div class="screenshot">
-                        <img src="/screenshots/${screenshot}" alt="Screenshot ${index + 1}">
-                        <p>Step ${index + 1}: ${screenshot.replace(/\\d{4}-\\d{2}-\\d{2}T.*\\.png$/, '')}</p>
-                    </div>
-                `).join('')}
+                ${screenshotsHtml}
             </div>
         </div>
 
@@ -204,257 +227,79 @@ function generateHtmlReport(result) {
 }
 
 app.post('/api/run-test', async (req, res) => {
-  try {
-    const browser = await playwrightTest.chromium.launch();
-    const startTime = new Date().toISOString();
-    const testResult = await runVideoConverterTest(browser);
-    testResult.startTime = startTime;
-    
-    // Generate HTML report
-    const htmlReport = generateHtmlReport(testResult);
-    
-    // Save HTML report
-    const reportPath = path.join(process.cwd(), 'test-report.html');
-    fs.writeFileSync(reportPath, htmlReport);
-    
-    testResults.push(testResult);
-    await browser.close();
-    
-    // Return both JSON result and HTML report URL
-    res.json({
-      ...testResult,
-      htmlReport: '/test-report.html'
-    });
-  } catch (error) {
-    res.status(500).json({ error: error.message });
-  }
+    try {
+        const browser = await playwrightTest.chromium.launch();
+        const context = await browser.newContext();
+        const page = await context.newPage();
+
+        const testConfig = {
+            url: 'https://video-converter.com',
+            steps: [
+                {
+                    name: 'Check website availability',
+                    action: async (page) => {
+                        await page.waitForLoadState('domcontentloaded');
+                    }
+                },
+                {
+                    name: 'Locate URL input',
+                    action: async (page) => {
+                        const selectors = [
+                            'input[type="url"]',
+                            'input[type="text"]',
+                            'input[placeholder*="url" i]',
+                            'input[placeholder*="link" i]',
+                            '#videoUrl',
+                            '#url',
+                            '.url-input'
+                        ];
+
+                        for (const selector of selectors) {
+                            const input = await page.$(selector);
+                            if (input) {
+                                await input.fill('https://www.youtube.com/watch?v=aWk2XZ_8IhA');
+                                return;
+                            }
+                        }
+                        throw new Error('Could not find suitable input method for URL');
+                    }
+                }
+            ]
+        };
+
+        const testResult = await orchestrator.runTest(page, testConfig);
+        
+        // Generate HTML report
+        const htmlReport = generateHtmlReport(testResult);
+        const reportPath = path.join(process.cwd(), 'test-report.html');
+        fs.writeFileSync(reportPath, htmlReport);
+
+        await browser.close();
+        
+        res.json({
+            ...testResult,
+            htmlReport: '/test-report.html'
+        });
+    } catch (error) {
+        res.status(500).json({ error: error.message });
+    }
 });
 
 // Serve the HTML report
 app.get('/test-report.html', (req, res) => {
-  const reportPath = path.join(process.cwd(), 'test-report.html');
-  if (fs.existsSync(reportPath)) {
-    res.sendFile(reportPath);
-  } else {
-    res.status(404).send('No test report available');
-  }
+    const reportPath = path.join(process.cwd(), 'test-report.html');
+    if (fs.existsSync(reportPath)) {
+        res.sendFile(reportPath);
+    } else {
+        res.status(404).send('No test report available');
+    }
 });
 
 app.get('/api/test-results', (req, res) => {
-  res.json(testResults);
+    res.json(testResults);
 });
 
 const PORT = process.env.PORT || 3001;
 app.listen(PORT, () => {
-  console.log(`Server running on port ${PORT}`);
+    console.log(`Server running on port ${PORT}`);
 });
-
-async function runVideoConverterTest(browser) {
-  const context = await browser.newContext();
-  const page = await context.newPage();
-  const startTime = new Date();
-  const steps = [];
-  let failedSteps = [];
-  const screenshots = [];
-
-  try {
-    // Create screenshots directory if it doesn't exist
-    const screenshotDir = './screenshots';
-    if (!fs.existsSync(screenshotDir)) {
-      fs.mkdirSync(screenshotDir);
-    }
-
-    // First, check if the site is accessible
-    steps.push('Check website availability');
-    try {
-      await page.goto('https://video-converter.com/', { 
-        timeout: 10000,
-        waitUntil: 'domcontentloaded'
-      });
-      const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
-      await page.screenshot({ 
-        path: path.join(screenshotDir, `initial-load-${timestamp}.png`),
-        fullPage: true 
-      });
-      screenshots.push(`initial-load-${timestamp}.png`);
-    } catch (error) {
-      const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
-      await page.screenshot({ 
-        path: path.join(screenshotDir, `load-error-${timestamp}.png`),
-        fullPage: true 
-      });
-      screenshots.push(`load-error-${timestamp}.png`);
-      throw new Error(`Website is not accessible: ${error.message}`);
-    }
-
-    // If we get here, the site loaded
-    console.log('Website loaded successfully, proceeding with test...');
-    
-    // Rest of the test code...
-    steps.push('Analyze page structure');
-    const pageTitle = await page.title();
-    console.log('Page title:', pageTitle);
-
-    // Log page status
-    const response = await page.reload({ waitUntil: 'domcontentloaded' });
-    console.log('Page status:', response.status());
-    
-    // Record test steps and results
-    steps.push('Navigate to video-converter.com');
-    await page.goto('https://video-converter.com/');
-    
-    // Wait for page load and analyze structure
-    steps.push('Analyze page structure');
-    await page.waitForLoadState('networkidle');
-    
-    // Log all input fields and buttons for analysis
-    const inputFields = await page.$$eval('input', inputs => 
-      inputs.map(input => ({
-        type: input.type,
-        id: input.id,
-        name: input.name,
-        placeholder: input.placeholder,
-        isVisible: input.offsetParent !== null
-      }))
-    );
-    console.log('Available input fields:', JSON.stringify(inputFields, null, 2));
-
-    // Try to input YouTube URL
-    steps.push('Attempt to interact with URL input');
-    const youtubeUrl = 'https://www.youtube.com/watch?v=aWk2XZ_8IhA';
-    
-    // Try multiple potential selectors
-    const possibleSelectors = [
-      'input[type="url"]',
-      'input[type="text"]',
-      'input[placeholder*="url" i]',
-      'input[placeholder*="link" i]',
-      '#videoUrl',
-      '#url',
-      '.url-input'
-    ];
-
-    let foundInput = false;
-    for (const selector of possibleSelectors) {
-      const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
-      await page.screenshot({ 
-        path: path.join(screenshotDir, `attempt-input-${timestamp}.png`),
-        fullPage: true 
-      });
-      screenshots.push(`attempt-input-${timestamp}.png`);
-
-      const input = await page.$(selector);
-      if (input) {
-        try {
-          await input.fill(youtubeUrl);
-          foundInput = true;
-          console.log(`Successfully used selector: ${selector}`);
-          break;
-        } catch (e) {
-          console.log(`Failed with selector ${selector}:`, e.message);
-        }
-      }
-    }
-
-    if (!foundInput) {
-      const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
-      await page.screenshot({ 
-        path: path.join(screenshotDir, `no-input-found-${timestamp}.png`),
-        fullPage: true 
-      });
-      screenshots.push(`no-input-found-${timestamp}.png`);
-      throw new Error('Could not find suitable input method for URL');
-    }
-
-    // Final screenshot
-    const finalTimestamp = new Date().toISOString().replace(/[:.]/g, '-');
-    await page.screenshot({ 
-      path: path.join(screenshotDir, `final-state-${finalTimestamp}.png`),
-      fullPage: true 
-    });
-    screenshots.push(`final-state-${finalTimestamp}.png`);
-
-    // Generate AI analysis of the test results
-    const aiAnalysis = await generateAIAnalysis(steps, failedSteps);
-
-    return {
-      testName: 'YouTube URL Upload Test - video-converter.com',
-      status: 'fail',
-      timestamp: startTime.toISOString(),
-      steps: steps,
-      failedSteps: failedSteps,
-      screenshots: screenshots,
-      description: aiAnalysis,
-      pageAnalysis: {
-        inputFields,
-        buttons: await page.$$eval('button, .btn, [role="button"]', 
-          btns => btns.map(b => ({
-            text: b.textContent,
-            isVisible: b.offsetParent !== null,
-            classes: b.className
-          }))
-        )
-      }
-    };
-
-  } catch (error) {
-    failedSteps.push(steps[steps.length - 1]);
-    
-    // Generate AI analysis of the test results
-    const aiAnalysis = await generateAIAnalysis(steps, failedSteps);
-
-    return {
-      testName: 'YouTube URL Upload Test - video-converter.com',
-      status: 'fail',
-      timestamp: startTime.toISOString(),
-      steps: steps,
-      failedSteps: failedSteps,
-      screenshots: screenshots,
-      description: aiAnalysis,
-      error: error.message
-    };
-  } finally {
-    await context.close();
-  }
-}
-
-async function findInputElement(page) {
-  // Common selectors for URL input fields
-  const selectors = [
-    'input[type="url"]',
-    'input[type="text"]',
-    '[placeholder*="url" i]',
-    '[placeholder*="link" i]',
-    '[role="textbox"]'
-  ];
-
-  for (const selector of selectors) {
-    const element = await page.$(selector);
-    if (element) return selector;
-  }
-  return null;
-}
-
-async function generateAIAnalysis(steps, failedSteps) {
-  const prompt = `Analyze this website test result:
-    Steps performed: ${steps.join(', ')}
-    Failed steps: ${failedSteps.join(', ')}
-    
-    Generate a brief, professional description of the test results, explaining why the test failed and what it means for the website's functionality.`;
-
-  const response = await openai.chat.completions.create({
-    model: "gpt-4",
-    messages: [
-      {
-        role: "system",
-        content: "You are a QA testing expert analyzing website test results."
-      },
-      {
-        role: "user",
-        content: prompt
-      }
-    ]
-  });
-
-  return response.choices[0].message.content;
-}
