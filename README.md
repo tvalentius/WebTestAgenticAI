@@ -1,4 +1,4 @@
-# Website Testing Software
+# Website Testing Agentic AI
 
 A proof of concept for website testing software using Playwright and OpenAI's LLM. This tool automates testing of video converter websites and provides detailed reports with AI-powered analysis.
 
