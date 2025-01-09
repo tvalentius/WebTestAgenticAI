@@ -20,8 +20,8 @@ A proof of concept for website testing software using Playwright and OpenAI's LL
 
 1. Clone the repository:
 ```bash
-git clone [repository-url]
-cd [repository-name]
+git clone [[repository-url]](https://github.com/tvalentius/WebTestAgenticAI.git)
+cd WebTestAgenticAI
 ```
 
 2. Install dependencies:
